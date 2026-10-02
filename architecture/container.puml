@@ -1,0 +1,32 @@
+@startuml
+!include <C4/C4_Container>
+
+Person(buyer, "Покупатель")
+Person(seller, "Продавец")
+
+System_Boundary(mp, "Marketplace") {
+  Container(user, "User Service", "HTTP API", "Пользователи")
+  Container(catalog, "Catalog Service", "HTTP API", "Каталог товаров")
+  Container(feed, "Feed Service", "HTTP API", "Лента товаров")
+  Container(order, "Order Service", "HTTP API", "Заказы")
+  Container(payment, "Payment Service", "HTTP API", "Платежи")
+  Container(notification, "Notification Service", "Worker", "Уведомления")
+
+  ContainerDb(userdb, "User DB")
+  ContainerDb(catalogdb, "Catalog DB")
+  ContainerDb(orderdb, "Order DB")
+  ContainerDb(paymentdb, "Payment DB")
+}
+
+Rel(buyer, feed, "Смотрит товары", "HTTP")
+Rel(buyer, order, "Оформляет заказ", "HTTP")
+Rel(seller, catalog, "Управляет товарами", "HTTP")
+Rel(order, payment, "Создает платеж", "HTTP")
+Rel(order, notification, "Событие статуса заказа", "Async")
+Rel(catalog, feed, "Передает изменения каталога", "Async")
+
+Rel(user, userdb, "R/W")
+Rel(catalog, catalogdb, "R/W")
+Rel(order, orderdb, "R/W")
+Rel(payment, paymentdb, "R/W")
+@enduml
