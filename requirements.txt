@@ -1,0 +1,12 @@
+fastapi==0.115.12
+uvicorn==0.34.2
+pydantic[email]==2.11.4
+sqlalchemy==2.0.40
+psycopg[binary]==3.2.6
+grpcio==1.71.0
+grpcio-tools==1.71.0
+protobuf==5.29.4
+redis==5.2.1
+alembic==1.15.2
+pytest==8.3.5
+httpx==0.28.1

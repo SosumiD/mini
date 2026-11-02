@@ -1,0 +1,77 @@
+syntax = "proto3";
+package flightbooking.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Public RPC business errors:
+// INVALID_ARGUMENT: invalid input, count, ID, date, route or status.
+// NOT_FOUND: no flight or reservation (ReleaseReservation).
+// RESOURCE_EXHAUSTED: insufficient available seats.
+// FAILED_PRECONDITION: flight not SCHEDULED; released booking cannot be reused.
+// ALREADY_EXISTS: booking ID already assigned to another reservation.
+// UNAUTHENTICATED: missing/wrong x-api-key metadata (all RPC methods).
+// UNAVAILABLE, DEADLINE_EXCEEDED: transport/timeout (client may retry).
+service FlightService {
+  rpc SearchFlights(SearchFlightsRequest) returns (SearchFlightsResponse);
+  rpc GetFlight(GetFlightRequest) returns (Flight);
+  rpc ReserveSeats(ReserveSeatsRequest) returns (SeatReservation);
+  rpc ReleaseReservation(ReleaseReservationRequest) returns (SeatReservation);
+  rpc UpdateFlight(UpdateFlightRequest) returns (Flight); // Optional administrative mutation.
+}
+
+enum FlightStatus {
+  FLIGHT_STATUS_UNSPECIFIED = 0;
+  SCHEDULED = 1;
+  DEPARTED = 2;
+  CANCELLED = 3;
+  COMPLETED = 4;
+}
+
+enum ReservationStatus {
+  RESERVATION_STATUS_UNSPECIFIED = 0;
+  ACTIVE = 1;
+  RELEASED = 2;
+  EXPIRED = 3;
+}
+
+message Flight {
+  string id = 1;
+  string airline = 2;
+  string flight_number = 3;
+  string origin = 4;
+  string destination = 5;
+  google.protobuf.Timestamp departure_at = 6;
+  google.protobuf.Timestamp arrival_at = 7;
+  int32 total_seats = 8;
+  int32 available_seats = 9;
+  int64 price_cents = 10; // RUB minor units, no floating-point prices.
+  FlightStatus status = 11;
+}
+
+message SeatReservation {
+  string id = 1;
+  string booking_id = 2;
+  string flight_id = 3;
+  int32 seat_count = 4;
+  ReservationStatus status = 5;
+}
+
+message SearchFlightsRequest {
+  string origin = 1;
+  string destination = 2;
+  // If absent, any departure date is accepted.
+  google.protobuf.Timestamp date = 3;
+}
+message SearchFlightsResponse { repeated Flight flights = 1; }
+message GetFlightRequest { string flight_id = 1; }
+message ReserveSeatsRequest {
+  string flight_id = 1;
+  int32 seat_count = 2;
+  string booking_id = 3; // Stable idempotency key (unique in Flight Service).
+}
+message ReleaseReservationRequest { string booking_id = 1; }
+message UpdateFlightRequest {
+  string flight_id = 1;
+  optional int64 price_cents = 2;
+  optional FlightStatus status = 3;
+}

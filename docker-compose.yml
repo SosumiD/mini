@@ -1,5 +1,110 @@
+name: flight-booking
+x-python-service: &python-service
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  networks: [backend]
+
 services:
-  service:
-    build: ./service
-    ports:
-      - "8000:8000"
+  booking-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: bookings
+      POSTGRES_USER: booking
+      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
+    volumes: [booking-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U booking -d bookings"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  flight-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: flights
+      POSTGRES_USER: flight
+      POSTGRES_PASSWORD: ${FLIGHT_DB_PASSWORD}
+    volumes: [flight-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flight -d flights"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+
+  redis-master:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis-master-data:/data]
+    networks: [backend]
+
+  redis-replica:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--replicaof", "redis-master", "6379", "--appendonly", "yes"]
+    depends_on: [redis-master]
+    volumes: [redis-replica-data:/data]
+    networks: [backend]
+
+  redis-sentinel-1:
+    image: redis:7.4-alpine
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"]
+    volumes: ["./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro"]
+    depends_on: [redis-master, redis-replica]
+    networks: [backend]
+
+  redis-sentinel-2:
+    image: redis:7.4-alpine
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"]
+    volumes: ["./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro"]
+    depends_on: [redis-master, redis-replica]
+    networks: [backend]
+
+  redis-sentinel-3:
+    image: redis:7.4-alpine
+    command: ["sh", "-c", "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"]
+    volumes: ["./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro"]
+    depends_on: [redis-master, redis-replica]
+    networks: [backend]
+
+  flight-service:
+    <<: *python-service
+    command: ["sh", "-c", "alembic -c services/flight/alembic.ini upgrade head && python -m services.flight.app.main"]
+    environment:
+      FLIGHT_DATABASE_URL: postgresql+psycopg://flight:${FLIGHT_DB_PASSWORD}@flight-db:5432/flights
+      GRPC_API_KEY: ${GRPC_API_KEY}
+      REDIS_SENTINELS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      REDIS_MASTER_NAME: mymaster
+      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-360}
+    depends_on:
+      flight-db: {condition: service_healthy}
+      redis-sentinel-1: {condition: service_started}
+      redis-sentinel-2: {condition: service_started}
+      redis-sentinel-3: {condition: service_started}
+
+  booking-service:
+    <<: *python-service
+    command: ["sh", "-c", "alembic -c services/booking/alembic.ini upgrade head && uvicorn services.booking.app.main:app --host 0.0.0.0 --port 8000"]
+    ports: ["8000:8000"]
+    environment:
+      BOOKING_DATABASE_URL: postgresql+psycopg://booking:${BOOKING_DB_PASSWORD}@booking-db:5432/bookings
+      FLIGHT_GRPC_TARGET: flight-service:50051
+      GRPC_API_KEY: ${GRPC_API_KEY}
+      GRPC_DEADLINE_SECONDS: ${GRPC_DEADLINE_SECONDS:-2}
+      CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
+      CB_OPEN_SECONDS: ${CB_OPEN_SECONDS:-15}
+      CB_WINDOW_SECONDS: ${CB_WINDOW_SECONDS:-30}
+    depends_on:
+      booking-db: {condition: service_healthy}
+      flight-service: {condition: service_started}
+
+volumes:
+  booking-data:
+  flight-data:
+  redis-master-data:
+  redis-replica-data:
+
+networks:
+  backend:
+    driver: bridge
