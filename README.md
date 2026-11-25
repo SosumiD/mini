@@ -1,109 +1,141 @@
-# Flight Booking — gRPC + PostgreSQL + Redis Sentinel
+# Online Cinema — Kafka → ClickHouse → PostgreSQL → Grafana / S3
 
-Учебный проект по заданию **«Flight Booking: gRPC + Redis»**, реализующий пункты 1–10 (см. статус тестирования ниже). Язык: Python 3.12; FastAPI, gRPC, SQLAlchemy 2, Alembic, PostgreSQL 16, Redis 7.4.
+Готовый учебный проект на Python 3.12 / FastAPI, выполняющий пункты 1–8 задания (до 10 баллов по рубрике). **Docker Compose нужен локально**. Не содержит заглушек и не требует ручного SQL или регистрации схем.
+
+## Быстрый запуск (Windows PowerShell, Git Bash, Linux)
+
+1. Откройте Docker Desktop и убедитесь, что Docker Engine работает. Рекомендуется **8–12 ГБ доступной RAM**, так как здесь 3 брокера Kafka, ClickHouse, PostgreSQL и Grafana.
+2. Откройте терминал в папке проекта и выполните одну команду:
+
+```bash
+docker compose up --build
+```
+
+На первом запуске Docker скачает образы и соберёт Python-контейнеры. `init` самостоятельно создаст Kafka topic, зарегистрирует Avro-схему **v1**, выполнит миграции двух БД. Producer начнёт генерировать историю просмотров за 12 дней и затем поток новых событий. Aggregator автоматически пересчитает дни истории и экспортирует агрегаты за вчера. Начальное наполнение и агрегация происходят после старта сервисов, поэтому графики появляются не мгновенно.
+
+Для запуска без лишнего вывода: `docker compose up --build -d`.
+
+## Куда заходить
+
+| Сервис | Адрес | Для чего |
+|---|---|---|
+| Producer | http://localhost:8000/docs | HTTP API `POST /events` |
+| Aggregator | http://localhost:8001/docs | `POST /aggregate/{date}`, `POST /export/{date}` |
+| Grafana | http://localhost:3000/d/cinema-analytics | Дашборд (admin / admin) |
+| MinIO Console | http://localhost:9001 | Файлы S3 (cinema / cinema_password) |
+| Schema Registry | http://localhost:8081/subjects/movie-events-value/versions/latest | Avro-схема и версия |
+| ClickHouse | http://localhost:8123 | SQL-интерфейс |
+
+Порты: Kafka host `19092`; PostgreSQL host `5433` (cinema / cinema_password / movie_analytics); ClickHouse native host `9009` (default / cinema_pass).
+
+## Проверка одной командой
+
+Можно запустить тесты после запуска сервисов либо позволить Compose поднять необходимые зависимости автоматически:
+
+```bash
+docker compose --profile test run --rm tests
+```
+
+В тесте: проверяются Schema Registry и Kafka replication, создаётся уникальная последовательность событий через HTTP, ожидание в ClickHouse, корректность полей, ручная агрегация, повторный UPSERT без дублей, экспорт и чтение результата из S3, проверка ошибок валидации. Данные теста изолируются случайными UUID — один и тот же тест запускается повторно.
+
+## Отправить своё событие
+
+**Git Bash или Linux:**
+
+```bash
+curl -X POST http://localhost:8000/events \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"alice","movie_id":"movie-1","event_type":"VIEW_STARTED","timestamp":"2026-11-25T12:00:00Z","device_type":"MOBILE","session_id":"s1","progress_seconds":0}'
+```
+
+`event_id` можно не передавать — сервер создаст UUID. Для проверки в ClickHouse:
+
+```bash
+docker compose exec clickhouse clickhouse-client --user default --password cinema_pass --query "SELECT count() FROM cinema.raw_events"
+```
+
+Пересчитать сегодняшнюю дату (подставьте текущую дату UTC):
+
+```bash
+curl -X POST http://localhost:8001/aggregate/2026-11-25
+```
+
+Экспортировать её:
+
+```bash
+curl -X POST http://localhost:8001/export/2026-11-25
+```
+
+MinIO: `movie-analytics/daily/YYYY-MM-DD/aggregates.csv`. Повторный экспорт заменяет существующий объект по тому же ключу.
 
 ## Архитектура
 
 ```text
-                     HTTP REST :8000
-   Client ────────────▶ Booking Service
-                         │    │ PostgreSQL "bookings"
-                         │    └─ Booking + BookingOperation
-                         │
-                         │ gRPC :50051 + x-api-key
-                         │ retry / circuit breaker interceptor
-                         ▼
-                      Flight Service
-                         │        │
-            PostgreSQL "flights"      Redis Sentinel (3 nodes)
-             Flight / SeatReservation  ↕
-                                     Redis primary + replica
+Producer (FastAPI + генератор) -- Avro --> Kafka (3 брокера, topic movie-events)
+                                            |
+                                            v
+                      ClickHouse Kafka Engine + Materialized View
+                                            |
+                                            v
+                      ClickHouse raw_events (ReplacingMergeTree)
+                                            |
+                                            v
+                      Aggregation Service (расписание / HTTP)
+                         |               |                |
+                         v               v                v
+                  CH daily_metrics  CH cohort_retention  PostgreSQL aggregates
+                         |               |                |
+                         +------ Grafana -+                v
+                                                     MinIO (CSV/S3)
 ```
 
-У каждого сервиса отдельная PostgreSQL. На хост открыт только REST 8000; gRPC и базы доступны исключительно внутри Docker. `.proto` самостоятельно разработан; Python-классы генерируются `protoc` во время сборки. Диаграмма: [docs/ER.md](docs/ER.md); транзакции и компромиссы: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Ключ Kafka — `user_id`: события одного пользователя попадают в одну партицию, что сохраняет их порядок в пределах одной партиции. **Три партиции, replication.factor=3, min.insync.replicas=2, acks=all**. Три KRaft-брокера позволяют пережить отказ одного брокера при достаточном ISR. Kafka KRaft в совмещённом режиме broker/controller выбран **только для учебного стенда**, для продакшена роли следует разделять.
 
-## Запуск с нуля
+Schema Registry хранит Avro v1 в `schemas/movie_event.avsc`. Producer сериализует события в формате **Confluent Avro** (wire format со schema ID), а ClickHouse читает их через `AvroConfluent`. При следующей версии добавляйте совместимые поля с default-значениями, проверяя правила совместимости в Schema Registry.
 
-Понадобятся Docker Engine/Desktop и Compose. В каталоге проекта:
+ClickHouse сырьё `raw_events` партиционировано по месяцам, отсортировано `(event_date, user_id, event_id)`. `ReplacingMergeTree` с `FINAL` в запросах агрегации уменьшает последствия повторной обработки Kafka (at-least-once); материализованные `daily_metrics` и `cohort_retention` обновляются через версии (`ReplacingMergeTree(version)`).
+
+## Формулы метрик
+
+- **DAU:** `uniqExact(user_id)` среди всех событий за день.
+- **Среднее время просмотра:** `avgIf(progress_seconds, VIEW_FINISHED)`.
+- **Топ фильмов:** `countIf(VIEW_STARTED)` по каждому фильму; топ 10 выбирается на дашборде.
+- **Конверсия:** количество `VIEW_FINISHED` / количество `VIEW_STARTED` × 100%. Это **отношение событий**, а не уникальных пользователей; в учебных данных один старт относится к одной сессии.
+- **Retention D1, D7:** когорта — дата первого `VIEW_STARTED` пользователя. Возвращение — ещё один `VIEW_STARTED` в соответствующий календарный день. `% = вернувшиеся / размер когорты × 100`. Будущие дни в heatmap не показаны, а не считаются нулём.
+
+Сервис пересчитывает метрики по расписанию (`AGG_INTERVAL_SECONDS`), а `POST /aggregate/YYYY-MM-DD` запускает пересчёт вручную. Лог: `cycle started`, `cycle finished`, количество событий и длительность. При записи в PostgreSQL используется `INSERT ... ON CONFLICT DO UPDATE` и retry с backoff. В PostgreSQL содержатся готовые метрики с PK `(day,metric,dimension)`.
+
+**Grafana** подключена к ClickHouse автоматически и использует **только агрегированные таблицы**, не `raw_events`. Дашборд: цветовая таблица Retention D0–D7 (когортная heatmap), DAU, конверсия, топ фильмов и среднее время просмотра.
+
+**Экспорт S3** встроен в Aggregation Service (без ещё одного сервиса ради одной задачи): идёт из PostgreSQL, формируется CSV с датой и временем расчёта, объект перезаписывается. Ночной экспорт настраивается тем же циклом; если S3/PG недоступны, ошибка логируется и следующий цикл повторит попытку. Ручной endpoint позволяет экспортировать любую дату с готовыми метриками.
+
+## Проверить отказоустойчивость Kafka
+
+После запуска данных можно проверить параметры и выключить один из трёх брокеров:
 
 ```bash
-cp .env.example .env
-# Замените GRPC_API_KEY на собственный длинный случайный ключ.
-docker compose up --build
+docker compose exec kafka1 kafka-topics --bootstrap-server kafka1:9092 --describe --topic movie-events
+docker compose stop kafka3
 ```
 
-После однократной настройки окружения весь стек запускается одной командой `docker compose up` (или `docker-compose up` для standalone Compose). Две миграции Alembic применяются автоматически. Создаются 4 демонстрационных рейса (2026-12-01 — 2026-12-03).
+Оставшиеся два брокера сохраняют кворум контроллеров и ISR≥2 (если оба были синхронны). Проверяйте HTTP-публикацию и появление событий в ClickHouse. Затем восстановите брокер: `docker compose start kafka3`.
 
-**REST и Swagger:** http://localhost:8000/docs, проверка: http://localhost:8000/health.
+## Состав файлов
 
-Команда PowerShell для создания `.env`: `Copy-Item .env.example .env`; запуск аналогичный `docker compose up --build`.
-
-## Примеры REST API
-
-`GET /flights?origin=SVO&destination=LED&date=2026-12-01` — поиск; `date` необязателен. `GET /flights/{id}` — детали.
-
-```bash
-curl "http://localhost:8000/flights?origin=SVO&destination=LED&date=2026-12-01"
-curl http://localhost:8000/flights/11111111-1111-4111-8111-111111111111
+```text
+app/shared.py          схема входного события и ClickHouse-клиент
+app/init.py            автосоздание Kafka topic, Schema Registry v1 и SQL-миграции
+app/producer.py        HTTP API + Kafka producer + генератор событий
+app/aggregator.py      метрики, cohort retention, PostgreSQL UPSERT, S3 export
+schemas/movie_event.avsc
+sql/clickhouse.sql     Kafka Engine, MergeTree, materialized view и метрики
+sql/postgres.sql       таблица агрегатов
+Grafana/...            provisioning datasource и готовый dashboard
+ tests/test_pipeline.py интеграционные тесты
 ```
 
-Создание бронирования (цена фиксируется на момент `GetFlight`; денежные суммы в ответе — строки с двумя знаками, валюта RUB):
+## Важные ограничения (честно на защите)
 
-```bash
-curl -X POST http://localhost:8000/bookings \
-  -H "Content-Type: application/json" \
-  -d '{"user_id":"user-1","flight_id":"11111111-1111-4111-8111-111111111111","passenger_name":"Ivan Petrov","passenger_email":"ivan@example.org","seat_count":2}'
-```
+Это **учебный стенд**, а не production deployment: пароли в Compose демонстрационные, соединения без TLS, KRaft с совмещёнными ролями, ClickHouse и PostgreSQL имеют по одному экземпляру. Высокая доступность реализована **для Kafka**, но не для ClickHouse, PostgreSQL или MinIO. `ReplacingMergeTree` предоставляет дедупликацию при чтении с `FINAL`, но не гарантирует exactly-once на всём пути. Повторный пересчёт исправляет агрегаты по мере поступления запоздалых событий. Работа на 10 баллов оценивается преподавателем по требованиям и фактическому запуску — проект не даёт автоматической гарантии оценки.
 
-В ответе поле `id` содержит UUID нового бронирования. Затем:
-
-```bash
-curl http://localhost:8000/bookings/BOOKING_UUID
-curl "http://localhost:8000/bookings?user_id=user-1"
-curl -X POST http://localhost:8000/bookings/BOOKING_UUID/cancel
-```
-
-При несуществующем рейсе — HTTP 404, нехватке мест — 409, недоступности Flight Service/OPEN circuit — 503. Ошибки валидации FastAPI возвращают 422; gRPC `INVALID_ARGUMENT` транслируется в 400.
-
-## Прогоны тестов
-
-После запуска контейнеров в отдельном терминале:
-
-```bash
-# Юнит-тесты переходов Circuit Breaker
-
-docker compose exec booking-service python -m pytest -q tests/test_circuit_breaker.py
-
-# Граница API, резервирование, счётчик, отмена и поиск
-python scripts/smoke_test.py
-
-# Глобальная аутентификация RPC и гонка за последнее место:
-docker compose exec booking-service python scripts/grpc_checks.py
-```
-
-`grpc_checks.py` использует отдельный одно-местный рейс `SU0001`. Запускайте его на неизменённой демонстрационной БД, без других бронирований этого рейса.
-
-Для просмотра cache HIT/MISS и переходов breaker: `docker compose logs -f flight-service booking-service`. Проверка отказа Redis: `docker compose stop redis-master` и просмотр `docker compose logs -f redis-sentinel-1 flight-service` (после выбора replica primary; во время failover запросы идут напрямую в PostgreSQL). Для проверки Circuit Breaker: остановить `flight-service`, выполнить 5+ запросов `GET /flights/{id}` и посмотреть переход в OPEN, потом через `CB_OPEN_SECONDS` проверить HALF_OPEN.
-
-## Соответствие критериям
-
-| Пункт | Реализация |
-|---|---|
-| 1. .proto | `shared/proto/flight.proto`: 5 бизнес-RPC, Timestamp, enums, коды ошибок, protoc |
-| 2. 3NF | `docs/ER.md` + ограничения в Alembic; независимые схемы |
-| 3. PostgreSQL/REST/gRPC | 2 PostgreSQL, 2 сервиса, автоприменение миграций |
-| 4. Межсервисные вызовы | GetFlight → ReserveSeats → Booking, ReleaseReservation на отмену |
-| 5. Транзакции | `SELECT FOR UPDATE`, единые транзакции в Flight Service, компенсирующая saga в Booking |
-| 6. Аутентификация | API Key в metadata и server interceptor на **всех RPC** |
-| 7. Redis Cache-Aside | flight/search keys, TTL 360s, invalidation, hit/miss |
-| 8. Retry | 3 попытки, backoff 100/200мс, только UNAVAILABLE/DEADLINE_EXCEEDED, идемпотентный booking_id |
-| 9. Redis HA | 1 primary + 1 replica + 3 Sentinel, Sentinel-aware клиент |
-| 10. Circuit Breaker | client-side gRPC interceptor, 3 состояния, env конфигурация, логи и REST 503 |
-
-## Важные оговорки
-
-- **В данной среде авторской сборки Docker недоступен**, поэтому end-to-end выполнение контейнеров здесь **не проводилось**. Не следует принимать код как подтверждённо успешно сданную работу: перед сдачей запустите команды тестирования выше и проверьте логи.
-- Базы **раздельные**, поэтому глобальной ACID-транзакции нет: используется saga c durable-журналом и периодической компенсацией. Это принципиальная особенность любой реализации без распределённого commit-протокола. Повтор `ReserveSeats` с тем же `booking_id` не резервирует повторно.
-- Cache-Aside + Redis Sentinel обеспечивает отказоустойчивость кеша, но не строгую согласованность при одновременных чтениях и инвалидировании или длительном сетевом разделении.
-- В учебном варианте нет внешнего OAuth для REST, mTLS между сервисами и HA для PostgreSQL. API Key передаётся в незашифрованном gRPC внутри приватной Compose-сети. За пределами учебной Docker-сети необходим TLS и политика секретов.
-- Seed-данные привязаны к декабрю 2026; для будущих проверок замените даты миграции/запросов либо создайте собственные рейсы.
+Остановить без удаления данных: `docker compose down`. Удалить и начать с нуля: `docker compose down -v`.

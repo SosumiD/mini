@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: Cinema ClickHouse
+    uid: cinema-clickhouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      host: clickhouse
+      port: 9000
+      protocol: native
+      username: default
+      defaultDatabase: cinema
+    secureJsonData:
+      password: cinema_pass

@@ -1,110 +1,239 @@
-name: flight-booking
-x-python-service: &python-service
-  build: .
+name: online-cinema
+
+x-kafka-common: &kafka-common
+  image: confluentinc/cp-kafka:7.8.12
   restart: unless-stopped
-  env_file: .env
-  networks: [backend]
+  healthcheck:
+    test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    interval: 10s
+    timeout: 10s
+    retries: 30
+    start_period: 25s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_NUM_PARTITIONS: 3
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'false'
+  KAFKA_LOG_RETENTION_HOURS: 72
+
+x-app-env: &app-env
+  KAFKA_SERVERS: kafka1:9092,kafka2:9092,kafka3:9092
+  SCHEMA_REGISTRY_URL: http://schema-registry:8081
+  CH_HOST: clickhouse
+  CH_PASSWORD: cinema_pass
+  PG_DSN: postgresql://cinema:cinema_password@postgres:5432/movie_analytics
+  S3_ENDPOINT: http://minio:9000
+  S3_ACCESS_KEY: cinema
+  S3_SECRET_KEY: cinema_password
 
 services:
-  booking-db:
-    image: postgres:16-alpine
+  kafka1:
+    <<: *kafka-common
+    hostname: kafka1
     environment:
-      POSTGRES_DB: bookings
-      POSTGRES_USER: booking
-      POSTGRES_PASSWORD: ${BOOKING_DB_PASSWORD}
-    volumes: [booking-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U booking -d bookings"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-    networks: [backend]
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:19092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka1:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+    ports:
+      - '19092:19092'
+    volumes:
+      - kafka1_data:/var/lib/kafka/data
 
-  flight-db:
-    image: postgres:16-alpine
+  kafka2:
+    <<: *kafka-common
+    hostname: kafka2
     environment:
-      POSTGRES_DB: flights
-      POSTGRES_USER: flight
-      POSTGRES_PASSWORD: ${FLIGHT_DB_PASSWORD}
-    volumes: [flight-data:/var/lib/postgresql/data]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U flight -d flights"]
-      interval: 3s
-      timeout: 3s
-      retries: 20
-    networks: [backend]
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka2:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+    volumes:
+      - kafka2_data:/var/lib/kafka/data
 
-  redis-master:
-    image: redis:7.4-alpine
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes: [redis-master-data:/data]
-    networks: [backend]
-
-  redis-replica:
-    image: redis:7.4-alpine
-    command: ["redis-server", "--replicaof", "redis-master", "6379", "--appendonly", "yes"]
-    depends_on: [redis-master]
-    volumes: [redis-replica-data:/data]
-    networks: [backend]
-
-  redis-sentinel-1:
-    image: redis:7.4-alpine
-    command: ["sh", "-c", "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"]
-    volumes: ["./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro"]
-    depends_on: [redis-master, redis-replica]
-    networks: [backend]
-
-  redis-sentinel-2:
-    image: redis:7.4-alpine
-    command: ["sh", "-c", "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"]
-    volumes: ["./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro"]
-    depends_on: [redis-master, redis-replica]
-    networks: [backend]
-
-  redis-sentinel-3:
-    image: redis:7.4-alpine
-    command: ["sh", "-c", "cp /etc/redis/sentinel.conf /tmp/sentinel.conf && exec redis-server /tmp/sentinel.conf --sentinel"]
-    volumes: ["./infra/redis/sentinel.conf:/etc/redis/sentinel.conf:ro"]
-    depends_on: [redis-master, redis-replica]
-    networks: [backend]
-
-  flight-service:
-    <<: *python-service
-    command: ["sh", "-c", "alembic -c services/flight/alembic.ini upgrade head && python -m services.flight.app.main"]
+  kafka3:
+    <<: *kafka-common
+    hostname: kafka3
     environment:
-      FLIGHT_DATABASE_URL: postgresql+psycopg://flight:${FLIGHT_DB_PASSWORD}@flight-db:5432/flights
-      GRPC_API_KEY: ${GRPC_API_KEY}
-      REDIS_SENTINELS: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
-      REDIS_MASTER_NAME: mymaster
-      CACHE_TTL_SECONDS: ${CACHE_TTL_SECONDS:-360}
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka3:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+    volumes:
+      - kafka3_data:/var/lib/kafka/data
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.12
+    restart: unless-stopped
+    ports:
+      - '8081:8081'
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka1:9092,PLAINTEXT://kafka2:9092,PLAINTEXT://kafka3:9092
     depends_on:
-      flight-db: {condition: service_healthy}
-      redis-sentinel-1: {condition: service_started}
-      redis-sentinel-2: {condition: service_started}
-      redis-sentinel-3: {condition: service_started}
+      kafka1: {condition: service_healthy}
+      kafka2: {condition: service_healthy}
+      kafka3: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
-  booking-service:
-    <<: *python-service
-    command: ["sh", "-c", "alembic -c services/booking/alembic.ini upgrade head && uvicorn services.booking.app.main:app --host 0.0.0.0 --port 8000"]
-    ports: ["8000:8000"]
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    restart: unless-stopped
     environment:
-      BOOKING_DATABASE_URL: postgresql+psycopg://booking:${BOOKING_DB_PASSWORD}@booking-db:5432/bookings
-      FLIGHT_GRPC_TARGET: flight-service:50051
-      GRPC_API_KEY: ${GRPC_API_KEY}
-      GRPC_DEADLINE_SECONDS: ${GRPC_DEADLINE_SECONDS:-2}
-      CB_FAILURE_THRESHOLD: ${CB_FAILURE_THRESHOLD:-5}
-      CB_OPEN_SECONDS: ${CB_OPEN_SECONDS:-15}
-      CB_WINDOW_SECONDS: ${CB_WINDOW_SECONDS:-30}
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: cinema_pass
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: '1'
+    ports:
+      - '8123:8123'
+      - '9009:9000'
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user default --password cinema_pass --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cinema
+      POSTGRES_PASSWORD: cinema_password
+      POSTGRES_DB: movie_analytics
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cinema -d movie_analytics"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:RELEASE.2025-02-07T23-21-09Z
+    command: server /data --console-address ':9001'
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: cinema
+      MINIO_ROOT_PASSWORD: cinema_password
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  init:
+    build: .
+    command: python -m app.init
+    environment: *app-env
     depends_on:
-      booking-db: {condition: service_healthy}
-      flight-service: {condition: service_started}
+      kafka1: {condition: service_healthy}
+      kafka2: {condition: service_healthy}
+      kafka3: {condition: service_healthy}
+      schema-registry: {condition: service_healthy}
+      clickhouse: {condition: service_healthy}
+      postgres: {condition: service_healthy}
+    restart: 'no'
+
+  producer:
+    build: .
+    command: uvicorn app.producer:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      GENERATE_EVENTS: 'true'
+      GENERATE_INTERVAL_SECONDS: '3'
+    ports:
+      - '8000:8000'
+    depends_on:
+      init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8000/health\",timeout=3)' "]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  aggregator:
+    build: .
+    command: uvicorn app.aggregator:app --host 0.0.0.0 --port 8000
+    restart: unless-stopped
+    environment:
+      <<: *app-env
+      AGG_STARTUP_DELAY_SECONDS: '35'
+      AGG_INTERVAL_SECONDS: '120'
+    ports:
+      - '8001:8000'
+    depends_on:
+      init: {condition: service_completed_successfully}
+      minio: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request;urllib.request.urlopen(\"http://localhost:8000/health\",timeout=3)' "]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+
+  grafana:
+    image: grafana/grafana:11.6.1
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  tests:
+    build: .
+    command: pytest -q tests/
+    profiles: [test]
+    environment: *app-env
+    depends_on:
+      producer: {condition: service_healthy}
+      aggregator: {condition: service_healthy}
 
 volumes:
-  booking-data:
-  flight-data:
-  redis-master-data:
-  redis-replica-data:
-
-networks:
-  backend:
-    driver: bridge
+  kafka1_data:
+  kafka2_data:
+  kafka3_data:
+  clickhouse_data:
+  postgres_data:
+  minio_data:
+  grafana_data:

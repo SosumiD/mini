@@ -1,0 +1,251 @@
+{
+  "uid": "cinema-analytics",
+  "title": "Online Cinema — Analytics",
+  "schemaVersion": 40,
+  "version": 1,
+  "timezone": "utc",
+  "refresh": "30s",
+  "tags": [
+    "cinema",
+    "clickhouse",
+    "kafka"
+  ],
+  "time": {
+    "from": "now-21d",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Retention Cohort Heatmap (D0–D7)",
+      "description": "Когорта — дата первого VIEW_STARTED; пустые будущие дни не включены",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 12
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT toString(cohort_date) AS \"Когорта\",\n  if(countIf(day_offset=0)=0, NULL, maxIf(retention_percent, day_offset=0)) AS \"Day 0\",\n  if(countIf(day_offset=1)=0, NULL, maxIf(retention_percent, day_offset=1)) AS \"Day 1\",\n  if(countIf(day_offset=2)=0, NULL, maxIf(retention_percent, day_offset=2)) AS \"Day 2\",\n  if(countIf(day_offset=3)=0, NULL, maxIf(retention_percent, day_offset=3)) AS \"Day 3\",\n  if(countIf(day_offset=4)=0, NULL, maxIf(retention_percent, day_offset=4)) AS \"Day 4\",\n  if(countIf(day_offset=5)=0, NULL, maxIf(retention_percent, day_offset=5)) AS \"Day 5\",\n  if(countIf(day_offset=6)=0, NULL, maxIf(retention_percent, day_offset=6)) AS \"Day 6\",\n  if(countIf(day_offset=7)=0, NULL, maxIf(retention_percent, day_offset=7)) AS \"Day 7\"\nFROM cinema.cohort_retention FINAL\nWHERE cohort_date >= today() - 21\nGROUP BY cohort_date ORDER BY cohort_date DESC",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Day [0-7]"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "continuous-RdYlGn"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "min",
+                "value": 0
+              },
+              {
+                "id": "max",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "DAU — уникальные пользователи за день",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT toDateTime(day) AS time, value AS DAU FROM cinema.daily_metrics FINAL WHERE metric='dau' AND dimension='' AND day >= today()-21 ORDER BY day",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Конверсия просмотра, %",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT toDateTime(day) AS time, value AS conversion FROM cinema.daily_metrics FINAL WHERE metric='view_conversion_percent' AND dimension='' AND day >= today()-21 ORDER BY day",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "barchart",
+      "title": "Топ фильмов — количество стартов просмотра сегодня",
+      "gridPos": {
+        "x": 0,
+        "y": 21,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT dimension AS movie_id, toUInt64(value) AS views FROM cinema.daily_metrics FINAL WHERE metric='top_movie_views' AND day=today() ORDER BY views DESC LIMIT 10",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "showValue": "always",
+        "xField": "movie_id",
+        "stacking": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Среднее время завершённого просмотра, сек",
+      "gridPos": {
+        "x": 12,
+        "y": 21,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "grafana-clickhouse-datasource",
+        "uid": "cinema-clickhouse"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-clickhouse-datasource",
+            "uid": "cinema-clickhouse"
+          },
+          "queryType": "sql",
+          "rawSql": "SELECT toDateTime(day) AS time, value AS avg_seconds FROM cinema.daily_metrics FINAL WHERE metric='avg_watch_seconds' AND dimension='' AND day >= today()-21 ORDER BY day",
+          "format": "time_series"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
